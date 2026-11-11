@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>20215243 정준용</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="myMenu">
+        <!-- <center>
+            <button id="leftBtn">◀</button> <button id="upBtn">▲</button> <button id="rightBtn">▶</button><br>
+            <button id="downBtn">▼</button>
+        </center> -->
+    </div>
+    <canvas id="glCanvas"></canvas>
+    <script type="text/javascript" src="shaders/initShaders.js"></script>
+    <script type="text/javascript" src="shaders/initShaders2.js"></script>
+    <script type="text/javascript" src="MV.js"></script>
+    <script type="x-shader/x-vertex" id="vertex-shader">#version 300 es
+        layout(location = 0) in vec3 vPosition;
+        layout(location = 2) in vec2 vTexCoord;
+        out vec2 fTexCoord;
+        uniform mat4 worldMat, viewMat, projMat;
+
+        void main()
+        {
+            gl_Position = projMat * viewMat * worldMat * vec4(vPosition, 1.0);
+            fTexCoord = vTexCoord;
+        }
+    </script>
+    <script type="x-shader/x-fragment" id="fragment-shader">#version 300 es
+        precision mediump float;
+
+        uniform sampler2D texImage;
+        in vec2 fTexCoord;
+        out vec4 fragColor;
+
+        void main()
+        {
+            fragColor = texture(texImage, fTexCoord);
+            //fragColor = vec4(fTexCoord, 1, 1);
+            
+        }
+    </script>
+    <script type="module">
+        var gl;
+        let vertices = [];
+        var CubeVertexCount = 0, PillarVertexCount = 0, GroundVertexCount = 0, theta = 45;
+        var WallVertexCount = 0;
+        var program;
+        var colorProgram;
+
+        var colorWorldLoc;
+        var colorViewLoc;
+        var colorProjLoc;
+        var colorColorLoc;
+
+        var eye = vec3(14, 1, 13), at = vec3(0, 0, 0), cameraVec = vec3(0, -0.4472, -0.8944); // 0.4472 == 1.0/Math.sqrt(5)
+        var worldMatrix, viewMatrix, projectMatrix;
+        var worldMatLoc, viewMatLoc, projMatLoc, texImageLoc;
+
+        var isJumping = false;
+        var jumpV = 0;
+        var gravity = -0.01;
+
+        var wallZ = 0;
+        var wallThick = 1.0;
+
+        var isDragging = false;
+        var lastPos = vec3();
+        var rotationMatrix = mat4();    // 건너편 큐브
+
+        var fov = 90.0;
+
+        var startMouseX = 0;
+        var startMouseY = 0;
+        var playerSideCubeMatrix = mat4(); // 플레이어 큐브
+
+        // 0: 앞, 1: 오른쪽, 2: 뒤, 3: 왼쪽
+        var playerCubeColors = ["R", "G", "B", "Y"];
+        var targetCubeColors = ["Y", "R", "G", "B"]; // 정답
+        var rotationCount = 0;
+
+        var isClear = false;
+
+        generateModel();
+        init();
+        render();
+
+        // 충돌감지
+        function checkWallCollision(newX, newZ) {
+            if (isClear) {
+                return false;
+            }
+
+            // 중심-두께의 절반, 중심+두께의 절반
+            if (newZ > wallZ - wallThick / 2 && newZ < wallZ + wallThick / 2) {
+                return true;
+            }
+
+            return false;
+        }
+        // 클리어조건 - AI활용
+        function checkClear() {
+            for (var i = 0; i < 4; i++) {
+                if (playerCubeColors[i] != targetCubeColors[(i + rotationCount) % 4])
+                    return false;
+            }
+            alert("클리어!");
+            return true;
+        }
+
+
+        // 색 변환
+        function getColor(c) {
+            switch (c) {
+                case "R":
+                    return [1, 0, 0, 1];
+                case "G":
+                    return [0, 1, 0, 1];
+                case "B":
+                    return [0, 0, 1, 1];
+                case "Y":
+                    return [1, 1, 0, 1];
+            }
+        }
+
+
+
+
+
+        function init() {
+            var canvas = document.getElementById('glCanvas');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight - document.getElementById('myMenu').offsetHeight;
+
+            gl = canvas.getContext('webgl2', { antialias: false });
+            if (!gl) {
+                alert("WebGL 2 is not available!");
+                return;
+            }
+
+            // Configure WebGL
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.clearColor(0.2, 0.2, 0.2, 1.0);
+
+            // Enable hidden surface removal
+            gl.enable(gl.DEPTH_TEST);
+
+            // Load shaders and initialize attribute buffers
+            program = initShaders(gl, "vertex-shader", "fragment-shader");
+            gl.useProgram(program);
+
+            colorProgram = initShaders2(gl, "shaders/uniform_color_vert.glsl", "shaders/uniform_color_frag.glsl"
+            );
+
+            // Load the data into the GPU
+            var vbufferId = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vbufferId);
+            gl.bufferData(gl.ARRAY_BUFFER, flatten(vertices), gl.STATIC_DRAW);
+
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+
+            gl.enableVertexAttribArray(2);
+            gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 20, 12);
+
+            worldMatrix = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+            worldMatLoc = gl.getUniformLocation(program, "worldMat");
+            gl.uniformMatrix4fv(worldMatLoc, false, worldMatrix);
+
+            viewMatrix = lookAt(vec3(2, 2, 2), vec3(0, 0, 0), vec3(0, 1, 0));
+            viewMatLoc = gl.getUniformLocation(program, "viewMat");
+            gl.uniformMatrix4fv(viewMatLoc, false, flatten(viewMatrix));
+
+
+            // 3D perspective viewing
+            var aspectRatio = canvas.width / canvas.height;
+            projectMatrix = perspective(90, aspectRatio, 0.001, 1000);
+            projMatLoc = gl.getUniformLocation(program, "projMat");
+            gl.uniformMatrix4fv(projMatLoc, false, flatten(projectMatrix));
+
+            texImageLoc = gl.getUniformLocation(program, "texImage");
+            var imageTex = new Image();
+            imageTex.src = "Images/desert.bmp";
+            imageTex.onload = function () {
+                var textureID = gl.createTexture();
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, textureID);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, imageTex);
+                gl.generateMipmap(gl.TEXTURE_2D);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            }
+
+            var imageTex2 = new Image();
+            imageTex2.src = "Images/brick.bmp";
+            imageTex2.onload = function () {
+                var textureID = gl.createTexture();
+                gl.activeTexture(gl.TEXTURE2);
+                gl.bindTexture(gl.TEXTURE_2D, textureID);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, imageTex2);
+                gl.generateMipmap(gl.TEXTURE_2D);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            }
+
+            var imageTex3 = new Image();
+            imageTex3.src = "Images/sbrick_color.bmp";
+            imageTex3.onload = function () {
+                var textureID = gl.createTexture();
+                gl.activeTexture(gl.TEXTURE3);
+                gl.bindTexture(gl.TEXTURE_2D, textureID);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, imageTex3);
+                gl.generateMipmap(gl.TEXTURE_2D);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            }
+
+            var imageTex4 = new Image();
+            imageTex4.src = "Images/brick_color.bmp";
+            imageTex4.onload = function () {
+                var textureID = gl.createTexture();
+                gl.activeTexture(gl.TEXTURE4);
+                gl.bindTexture(gl.TEXTURE_2D, textureID);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, imageTex4);
+                gl.generateMipmap(gl.TEXTURE_2D);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            }
+
+            gl.enable(gl.DEPTH_TEST);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+
+            colorWorldLoc = gl.getUniformLocation(colorProgram, "worldMat");
+            colorViewLoc = gl.getUniformLocation(colorProgram, "viewMat");
+            colorProjLoc = gl.getUniformLocation(colorProgram, "projMat");
+            colorColorLoc = gl.getUniformLocation(colorProgram, "uColor");
+
+
+
+
+            var sinTheta = Math.sin(0.1);
+            var cosTheta = Math.cos(0.1);
+
+            window.onkeydown = function (event) {
+                var key = String.fromCharCode(event.keyCode);
+                switch (key) {
+                    case "W":
+                        var newPosX = eye[0] + 0.5 * cameraVec[0];
+                        var newPosZ = eye[2] + 0.5 * cameraVec[2];
+                        if (
+                            newPosX > -25 && newPosX < 25 &&
+                            newPosZ > -25 && newPosZ < 25 &&
+                            !checkWallCollision(newPosX, newPosZ)
+                        ) {
+                            eye[0] = newPosX;
+                            eye[2] = newPosZ;
+                            console.log(newPosX, newPosZ);
+                        }
+                        break;
+                    case "A":
+                        var newVecX = cosTheta * cameraVec[0] + sinTheta * cameraVec[2];
+                        var newVecZ = -sinTheta * cameraVec[0] + cosTheta * cameraVec[2];
+                        cameraVec[0] = newVecX;
+                        cameraVec[2] = newVecZ;
+                        break;
+                    case "S":
+                        var newPosX = eye[0] - 0.5 * cameraVec[0];
+                        var newPosZ = eye[2] - 0.5 * cameraVec[2];
+                        if (
+                            newPosX > -25 && newPosX < 25 &&
+                            newPosZ > -25 && newPosZ < 25 &&
+                            !checkWallCollision(newPosX, newPosZ)
+                        ) {
+                            eye[0] = newPosX;
+                            eye[2] = newPosZ;
+                        }
+                        break;
+                    case "D":
+                        var newVecX = cosTheta * cameraVec[0] - sinTheta * cameraVec[2];
+                        var newVecZ = sinTheta * cameraVec[0] + cosTheta * cameraVec[2];
+                        cameraVec[0] = newVecX;
+                        cameraVec[2] = newVecZ;
+                        break;
+
+                }
+            }
+            window.addEventListener("keydown", function (event) {
+                if (event.code == "Space" && !isJumping) {
+                    isJumping = true;
+                    jumpV = 0.3;
+                }
+            });
+
+            window.onresize = function () {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight - document.getElementById('myMenu').offsetHeight;
+                gl.viewport(0, 0, canvas.width, canvas.height);
+
+                // 3D perspective viewing
+                var aspectRatio = canvas.width / canvas.height;
+                projectMatrix = perspective(90, aspectRatio, 0.001, 1000);
+                gl.uniformMatrix4fv(projMatLoc, false, flatten(projectMatrix));
+            };
+
+            canvas.addEventListener("mousedown", function (event) {
+                if (isClear) {
+                    return;
+                }
+                isDragging = true;
+                startMouseX = event.clientX;
+                startMouseY = event.clientY;
+                canvas.style.cursor = "grab";
+            });
+
+            canvas.addEventListener("mouseup", function (event) {
+                if (!isDragging) return;
+                isDragging = false;
+                canvas.style.cursor = "default";
+
+                var deltaX = event.clientX - startMouseX;
+                var deltaY = event.clientY - startMouseY;
+                var threshold = 30;
+
+                // 90도 회전 - AI활용
+                if (Math.abs(deltaX) > Math.abs(deltaY)) {
+                    if (Math.abs(deltaX) > threshold) {
+                        var dir = deltaX > 0 ? 1 : -1;
+
+                        var snapRotate = rotate(dir * 90, vec3(0, 1, 0));
+                        playerSideCubeMatrix = mult(snapRotate, playerSideCubeMatrix);
+
+                        if (dir > 0) {
+                            rotationCount = (rotationCount + 1) % 4;
+                        }
+                        else {
+                            rotationCount = (rotationCount + 3) % 4;
+                        }
+                    }
+                }
+                // else {
+                //     if (Math.abs(deltaY) > threshold) {
+                //         var snapRotate = rotate(deltaY > 0 ? 90 : -90, vec3(1, 0, 0));
+                //         playerSideCubeMatrix = mult(snapRotate, playerSideCubeMatrix);
+                //     }
+                // }
+
+                if (checkClear()) {
+                            isClear = true;
+                            console.log("클리어!");
+                        } 
+                
+                
+            });
+
+            canvas.addEventListener("mouseleave", function () {
+                isDragging = false;
+                canvas.style.cursor = "default";
+            });
+
+            canvas.addEventListener("wheel", function (event) {
+                event.preventDefault();
+
+                if (event.deltaY > 0)
+                    fov += 5;
+                else
+                    fov -= 5;
+                fov = Math.max(10.0, Math.min(fov, 150.0));
+
+                var aspectRatio = canvas.width / canvas.height;
+                projectMatrix = perspective(fov, aspectRatio, 0.001, 1000);
+                gl.uniformMatrix4fv(projMatLoc, false, flatten(projectMatrix));
+
+            }, { passive: false });
+
+        }
+
+        function render() {
+            gl.disable(gl.BLEND);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            at[0] = eye[0] + cameraVec[0];
+            at[1] = eye[1] + cameraVec[1];
+            at[2] = eye[2] + cameraVec[2];
+            viewMatrix = lookAt(eye, at, vec3(0, 1, 0));
+
+            gl.useProgram(program);
+            gl.uniform1i(texImageLoc, 0);
+            gl.uniformMatrix4fv(viewMatLoc, false, flatten(viewMatrix));
+            gl.uniformMatrix4fv(projMatLoc, false, flatten(projectMatrix));
+
+            var matCubeA = translate(0, 0, -15.0);
+            gl.useProgram(colorProgram);
+            gl.uniformMatrix4fv(colorViewLoc, false, flatten(viewMatrix));
+            gl.uniformMatrix4fv(colorProjLoc, false, flatten(projectMatrix));
+            gl.uniformMatrix4fv(colorWorldLoc, false, flatten(matCubeA));
+
+            gl.uniform4fv(colorColorLoc, getColor(targetCubeColors[0]));
+            gl.drawArrays(gl.TRIANGLES, 3 * 6, 6); // 앞
+            gl.uniform4fv(colorColorLoc, getColor(targetCubeColors[1]));
+            gl.drawArrays(gl.TRIANGLES, 0 * 6, 6); // 오
+            gl.uniform4fv(colorColorLoc, getColor(targetCubeColors[2]));
+            gl.drawArrays(gl.TRIANGLES, 1 * 6, 6); // 뒤
+            gl.uniform4fv(colorColorLoc, getColor(targetCubeColors[3]));
+            gl.drawArrays(gl.TRIANGLES, 2 * 6, 6); // 왼
+
+            gl.useProgram(program);
+            gl.uniformMatrix4fv(viewMatLoc, false, flatten(viewMatrix));
+            gl.uniformMatrix4fv(projMatLoc, false, flatten(projectMatrix));
+            gl.uniformMatrix4fv(worldMatLoc, false, flatten(matCubeA));
+            gl.activeTexture(isClear ? gl.TEXTURE3 : gl.TEXTURE4);
+            gl.uniform1i(texImageLoc, isClear ? 3 : 4);
+            gl.drawArrays(gl.TRIANGLES, 4 * 6, 6); // 아래
+            gl.drawArrays(gl.TRIANGLES, 5 * 6, 6); // 위
+
+
+            var matPosition = translate(0, 0, 15.0);
+            var matCubeB = mult(matPosition, playerSideCubeMatrix);
+            // 큐브 옆면
+            gl.useProgram(colorProgram);
+            gl.uniformMatrix4fv(colorViewLoc, false, flatten(viewMatrix));
+            gl.uniformMatrix4fv(colorProjLoc, false, flatten(projectMatrix));
+            gl.uniformMatrix4fv(colorWorldLoc, false, flatten(matCubeB));
+
+            gl.uniform4fv(colorColorLoc, getColor(playerCubeColors[0]));
+            gl.drawArrays(gl.TRIANGLES, 3 * 6, 6); // 앞
+
+            gl.uniform4fv(colorColorLoc, getColor(playerCubeColors[1]));
+            gl.drawArrays(gl.TRIANGLES, 0 * 6, 6); // 오
+
+            gl.uniform4fv(colorColorLoc, getColor(playerCubeColors[2]));
+            gl.drawArrays(gl.TRIANGLES, 1 * 6, 6); // 뒤
+
+            gl.uniform4fv(colorColorLoc, getColor(playerCubeColors[3]));
+            gl.drawArrays(gl.TRIANGLES, 2 * 6, 6); // 왼
+
+            // 큐브 위아래
+            gl.useProgram(program);
+            gl.uniformMatrix4fv(worldMatLoc, false, flatten(matCubeB));
+            gl.activeTexture(isClear ? gl.TEXTURE3 : gl.TEXTURE4);
+            gl.uniform1i(texImageLoc, isClear ? 3 : 4);
+            gl.drawArrays(gl.TRIANGLES, 4 * 6, 6); // 아래
+            gl.drawArrays(gl.TRIANGLES, 5 * 6, 6); // 위
+
+            worldMatrix = mat4();
+            gl.uniformMatrix4fv(worldMatLoc, false, flatten(worldMatrix));
+            gl.uniform1i(texImageLoc, 0);
+            gl.drawArrays(gl.TRIANGLES, CubeVertexCount + PillarVertexCount + WallVertexCount, GroundVertexCount);
+
+            // 반투명 벽
+            gl.useProgram(program);
+            gl.uniformMatrix4fv(viewMatLoc, false, flatten(viewMatrix));
+            gl.uniformMatrix4fv(projMatLoc, false, flatten(projectMatrix));
+            gl.uniformMatrix4fv(worldMatLoc, false, flatten(mat4()));
+
+            if (!isClear) {
+                gl.enable(gl.BLEND);
+                gl.activeTexture(gl.TEXTURE2);
+                gl.uniform1i(texImageLoc, 2);
+                gl.blendColor(0, 0, 0, 0.955);
+                gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+                gl.drawArrays(gl.TRIANGLES, CubeVertexCount + PillarVertexCount, WallVertexCount);
+            }
+
+            // 점프구현
+            if (isJumping) {
+                eye[1] += jumpV;
+                jumpV += gravity;
+                if (eye[1] <= 1) {
+                    eye[1] = 1;
+                    isJumping = false;
+                    jumpV = 0;
+                }
+            }
+
+            window.requestAnimationFrame(render);
+        }
+
+
+        function generateModel() {
+            // Cube
+            const cube_pos = [vec3(-0.5, -0.5, -0.5),
+            vec3(0.5, -0.5, -0.5),
+            vec3(0.5, 0.5, -0.5),
+            vec3(-0.5, 0.5, -0.5),
+            vec3(-0.5, -0.5, 0.5),
+            vec3(0.5, -0.5, 0.5),
+            vec3(0.5, 0.5, 0.5),
+            vec3(-0.5, 0.5, 0.5)];
+            const cube_uv = [vec2(0, 0), vec2(1, 0), vec2(1, 1), vec2(0, 1)];
+            texQuad(1, 2, 6, 5);    // right
+            texQuad(2, 1, 0, 3);    // back
+            texQuad(3, 0, 4, 7);    // left
+            texQuad(4, 5, 6, 7);    // front
+            texQuad(5, 4, 0, 1);    // bottom
+            texQuad(6, 2, 3, 7);    // top
+
+            function texQuad(a, b, c, d) {
+                // two triangles (a, b, c) and (a, c, d)
+                vertices.push(cube_pos[a]);
+                vertices.push(cube_uv[0]); CubeVertexCount++;
+                vertices.push(cube_pos[b]);
+                vertices.push(cube_uv[1]); CubeVertexCount++;
+                vertices.push(cube_pos[c]);
+                vertices.push(cube_uv[2]); CubeVertexCount++;
+
+                vertices.push(cube_pos[a]);
+                vertices.push(cube_uv[0]); CubeVertexCount++;
+                vertices.push(cube_pos[c]);
+                vertices.push(cube_uv[2]); CubeVertexCount++;
+                vertices.push(cube_pos[d]);
+                vertices.push(cube_uv[3]); CubeVertexCount++;
+            };
+
+            //Pillar
+            // const pillar_pos = [vec3(0.5, 2.0, 0.0),
+            // vec3(0.25, 2.0, 0.4333),
+            // vec3(-0.25, 2.0, 0.4333),
+            // vec3(-0.5, 2.0, 0.0),
+            // vec3(-0.25, 2.0, -0.4333),
+            // vec3(0.25, 2.0, -0.4333),
+            // vec3(0.5, -1.0, 0.0),
+            // vec3(0.25, -1.0, 0.4333),
+            // vec3(-0.25, -1.0, 0.4333),
+            // vec3(-0.5, -1.0, 0.0),
+            // vec3(-0.25, -1.0, -0.4333),
+            // vec3(0.25, -1.0, -0.4333)];
+            // const pillar_uv = [vec2(0, 3), vec2(0.3333, 3), vec2(0.6666, 3), vec2(1, 3), vec2(0.6666, 3), vec2(0.3333, 3),
+            // vec2(0, 0), vec2(0.3333, 0), vec2(0.6666, 0), vec2(1, 0), vec2(0.6666, 0), vec2(0.3333, 0)]
+            // texPillar(0, 1, 7, 6);
+            // texPillar(1, 2, 8, 7);
+            // texPillar(2, 3, 9, 8);
+            // texPillar(3, 4, 10, 9);
+            // texPillar(4, 5, 11, 10);
+            // texPillar(5, 0, 6, 11);
+            // function texPillar(a, b, c, d) {
+            //     vertices.push(pillar_pos[a]);
+            //     vertices.push(pillar_uv[a]); PillarVertexCount++;
+            //     vertices.push(pillar_pos[b]);
+            //     vertices.push(pillar_uv[b]); PillarVertexCount++;
+            //     vertices.push(pillar_pos[c]);
+            //     vertices.push(pillar_uv[c]); PillarVertexCount++;
+
+            //     vertices.push(pillar_pos[a]);
+            //     vertices.push(pillar_uv[a]); PillarVertexCount++;
+            //     vertices.push(pillar_pos[c]);
+            //     vertices.push(pillar_uv[c]); PillarVertexCount++;
+            //     vertices.push(pillar_pos[d]);
+            //     vertices.push(pillar_uv[d]); PillarVertexCount++;
+            // }
+            const ww = 25.0;
+            const wh = 1.5;
+            const wt = wallThick / 2.0;
+
+            const wall_pos = [
+                vec3(-ww, 0.0 - wh, wallZ - wt), vec3(ww, 0.0 - wh, wallZ - wt),
+                vec3(ww, 0.0 + wh, wallZ - wt), vec3(-ww, 0.0 + wh, wallZ - wt),
+                vec3(-ww, 0.0 - wh, wallZ + wt), vec3(ww, 0.0 - wh, wallZ + wt),
+                vec3(ww, 0.0 + wh, wallZ + wt), vec3(-ww, 0.0 + wh, wallZ + wt)
+            ];
+            const wall_uv = [vec2(0, 0), vec2(10, 0), vec2(10, 2), vec2(0, 2)];
+
+            function texWall(a, b, c, d) {
+
+                vertices.push(wall_pos[a]);
+                vertices.push(wall_uv[0]); WallVertexCount++;
+                vertices.push(wall_pos[b]);
+                vertices.push(wall_uv[1]); WallVertexCount++;
+                vertices.push(wall_pos[c]);
+                vertices.push(wall_uv[2]); WallVertexCount++;
+
+                vertices.push(wall_pos[a]);
+                vertices.push(wall_uv[0]); WallVertexCount++;
+                vertices.push(wall_pos[c]);
+                vertices.push(wall_uv[2]); WallVertexCount++;
+                vertices.push(wall_pos[d]);
+                vertices.push(wall_uv[3]); WallVertexCount++;
+            }
+
+            // 벽 - 01324576
+            texWall(6, 2, 3, 7); // 상
+            texWall(5, 4, 0, 1); // 하
+            texWall(3, 0, 4, 7); // 좌
+            texWall(1, 2, 6, 5); // 우
+            texWall(4, 5, 6, 7); // 전
+            texWall(2, 1, 0, 3); // 후
+
+
+            // Ground
+            vertices.push(vec3(-25, -1, 25), vec2(0, 0),
+                vec3(25, -1, 25), vec2(30, 0),
+                vec3(25, -1, -25), vec2(30, 30),
+                vec3(-25, -1, 25), vec2(0, 0),
+                vec3(25, -1, -25), vec2(30, 30),
+                vec3(-25, -1, -25), vec2(0, 30));
+            GroundVertexCount = 6;
+        }
+
+
+
+    </script>
+</body>
+
+</html>
